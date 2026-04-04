@@ -117,6 +117,7 @@ Docs: https://docs.openclaw.ai
 - CLI/skills JSON: route `skills list --json`, `skills info --json`, and `skills check --json` output to stdout instead of stderr so machine-readable consumers receive JSON on the expected stream again. (#60914; fixes #57599; landed from contributor PR #57611 by @Aftabbs) Thanks @Aftabbs.
 - Agents/subagents: honor allowlist validation, auth-profile handoff, and session override state when a subagent retries after `LiveSessionModelSwitchError`. (#58178) Thanks @openperf.
 - Agents/exec: restore `host=node` routing for node-pinned and `host=auto` sessions, while still blocking sandboxed `auto` sessions from jumping to gateway. (#60788) Thanks @openperf.
+- Core/approvals: share approval-not-found fallback classification through the narrow `plugin-sdk/error-runtime` seam so core `/approve` and Telegram stay aligned without widening `plugin-sdk/infra-runtime`. (#60932) Thanks @gumadeiras.
 
 ## 2026.4.2
 
@@ -150,7 +151,6 @@ Docs: https://docs.openclaw.ai
 - Gateway/Windows scheduled tasks: preserve Task Scheduler settings on reinstall, fail loud when Scheduled Task `/Run` does not start, and report fast failed restarts with the actual elapsed time instead of a fake 60s timeout. (#59335) Thanks @tmimmanuel.
 - Control UI/model picker: preserve already-qualified `provider/model` refs from the server so models whose ids already contain slashes stop being double-prefixed and remapped to the wrong provider. (#49874) Thanks @ShionEria.
 - Models/selection: resolve bare model ids in session model switches against the configured allowlist before falling back to the current session provider, so Control UI model picks stop drifting into `google/k2p5` and similar wrong-provider refs. (#51580) Thanks @honwee.
-- Core/approvals: share approval-not-found fallback classification through the narrow `plugin-sdk/error-runtime` seam so core `/approve` and Telegram stay aligned without widening `plugin-sdk/infra-runtime`. (#60932) Thanks @gumadeiras.
 
 ## 2026.4.1-beta.1
 
