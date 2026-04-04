@@ -9,6 +9,7 @@ import {
   ErrorCodes,
   errorShape,
   formatValidationErrors,
+  type TalkSpeakParams,
   validateTalkConfigParams,
   validateTalkModeParams,
   validateTalkSpeakParams,
@@ -18,6 +19,17 @@ import type { GatewayRequestHandlers } from "./types.js";
 
 const ADMIN_SCOPE = "operator.admin";
 const TALK_SECRETS_SCOPE = "operator.talk.secrets";
+type TalkSpeakReason =
+  | "talk_unconfigured"
+  | "talk_provider_unsupported"
+  | "method_unavailable"
+  | "synthesis_failed"
+  | "invalid_audio_result";
+
+type TalkSpeakErrorDetails = {
+  reason: TalkSpeakReason;
+  fallbackEligible: boolean;
+};
 
 function canReadTalkSecrets(client: { connect?: { scopes?: string[] } } | null): boolean {
   const scopes = Array.isArray(client?.connect?.scopes) ? client.connect.scopes : [];
@@ -66,17 +78,21 @@ function buildTalkTtsConfig(
   config: OpenClawConfig,
 ):
   | { cfg: OpenClawConfig; provider: string; providerConfig: TalkProviderConfig }
-  | { error: string } {
+  | { error: string; reason: TalkSpeakReason } {
   const resolved = resolveActiveTalkProviderConfig(config.talk);
   const provider = canonicalizeSpeechProviderId(resolved?.provider, config);
   if (!resolved || !provider) {
-    return { error: "talk.speak unavailable: talk provider not configured" };
+    return {
+      error: "talk.speak unavailable: talk provider not configured",
+      reason: "talk_unconfigured",
+    };
   }
 
   const speechProvider = getSpeechProvider(provider, config);
   if (!speechProvider) {
     return {
       error: `talk.speak unavailable: speech provider "${provider}" does not support Talk mode`,
+      reason: "talk_provider_unsupported",
     };
   }
 
@@ -112,23 +128,54 @@ function buildTalkTtsConfig(
   };
 }
 
+function isFallbackEligibleTalkReason(reason: TalkSpeakReason): boolean {
+  return (
+    reason === "talk_unconfigured" ||
+    reason === "talk_provider_unsupported" ||
+    reason === "method_unavailable"
+  );
+}
+
+function talkSpeakError(reason: TalkSpeakReason, message: string) {
+  const details: TalkSpeakErrorDetails = {
+    reason,
+    fallbackEligible: isFallbackEligibleTalkReason(reason),
+  };
+  return errorShape(ErrorCodes.UNAVAILABLE, message, { details });
+}
+
+function resolveTalkSpeed(params: TalkSpeakParams): number | undefined {
+  if (typeof params.speed === "number") {
+    return params.speed;
+  }
+  if (typeof params.rateWpm !== "number" || params.rateWpm <= 0) {
+    return undefined;
+  }
+  const resolved = params.rateWpm / 175;
+  if (resolved <= 0.5 || resolved >= 2.0) {
+    return undefined;
+  }
+  return resolved;
+}
+
 function buildTalkSpeakOverrides(
   provider: string,
   providerConfig: TalkProviderConfig,
   config: OpenClawConfig,
-  params: Record<string, unknown>,
+  params: TalkSpeakParams,
 ): TtsDirectiveOverrides {
   const speechProvider = getSpeechProvider(provider, config);
   if (!speechProvider?.resolveTalkOverrides) {
     return { provider };
   }
+  const resolvedSpeed = resolveTalkSpeed(params);
+  const resolvedVoiceId = resolveTalkVoiceId(providerConfig, trimString(params.voiceId));
   const providerOverrides = speechProvider.resolveTalkOverrides({
     talkProviderConfig: providerConfig,
     params: {
       ...params,
-      ...(resolveTalkVoiceId(providerConfig, trimString(params.voiceId)) == null
-        ? {}
-        : { voiceId: resolveTalkVoiceId(providerConfig, trimString(params.voiceId)) }),
+      ...(resolvedVoiceId == null ? {} : { voiceId: resolvedVoiceId }),
+      ...(resolvedSpeed == null ? {} : { speed: resolvedSpeed }),
     },
   });
   if (!providerOverrides || Object.keys(providerOverrides).length === 0) {
@@ -233,9 +280,26 @@ export const talkHandlers: GatewayRequestHandlers = {
       return;
     }
 
-    const text = trimString((params as { text?: unknown }).text);
+    const typedParams = params;
+    const text = trimString(typedParams.text);
     if (!text) {
       respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "talk.speak requires text"));
+      return;
+    }
+
+    if (
+      typedParams.speed == null &&
+      typedParams.rateWpm != null &&
+      resolveTalkSpeed(typedParams) == null
+    ) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          `invalid talk.speak params: rateWpm must resolve to speed between 0.5 and 2.0`,
+        ),
+      );
       return;
     }
 
@@ -243,7 +307,7 @@ export const talkHandlers: GatewayRequestHandlers = {
       const snapshot = await readConfigFileSnapshot();
       const setup = buildTalkTtsConfig(snapshot.config);
       if ("error" in setup) {
-        respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, setup.error));
+        respond(false, undefined, talkSpeakError(setup.reason, setup.error));
         return;
       }
 
@@ -251,7 +315,7 @@ export const talkHandlers: GatewayRequestHandlers = {
         setup.provider,
         setup.providerConfig,
         snapshot.config,
-        params,
+        typedParams,
       );
       const result = await synthesizeSpeech({
         text,
@@ -263,7 +327,23 @@ export const talkHandlers: GatewayRequestHandlers = {
         respond(
           false,
           undefined,
-          errorShape(ErrorCodes.UNAVAILABLE, result.error ?? "talk synthesis failed"),
+          talkSpeakError("synthesis_failed", result.error ?? "talk synthesis failed"),
+        );
+        return;
+      }
+      if ((result.provider ?? setup.provider).trim().length === 0) {
+        respond(
+          false,
+          undefined,
+          talkSpeakError("invalid_audio_result", "talk synthesis returned empty provider"),
+        );
+        return;
+      }
+      if (result.audioBuffer.length === 0) {
+        respond(
+          false,
+          undefined,
+          talkSpeakError("invalid_audio_result", "talk synthesis returned empty audio"),
         );
         return;
       }
@@ -281,7 +361,7 @@ export const talkHandlers: GatewayRequestHandlers = {
         undefined,
       );
     } catch (err) {
-      respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, formatForLog(err)));
+      respond(false, undefined, talkSpeakError("synthesis_failed", formatForLog(err)));
     }
   },
   "talk.mode": ({ params, respond, context, client, isWebchatConnect }) => {

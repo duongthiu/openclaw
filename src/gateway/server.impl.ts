@@ -59,7 +59,7 @@ import {
 } from "../plugins/channel-plugin-ids.js";
 import { getGlobalHookRunner, runGlobalGatewayStopSafely } from "../plugins/hook-runner-global.js";
 import { createEmptyPluginRegistry } from "../plugins/registry.js";
-import { setActivePluginRegistry } from "../plugins/runtime.js";
+import { getActivePluginRegistry, setActivePluginRegistry } from "../plugins/runtime.js";
 import { createPluginRuntime } from "../plugins/runtime/index.js";
 import type { PluginServicesHandle } from "../plugins/services.js";
 import { getTotalQueueSize } from "../process/command-queue.js";
@@ -618,7 +618,8 @@ export async function startGatewayServer(
     }));
     log.info(`plugins loaded (${pluginRegistry.plugins.length} plugins)`);
   } else {
-    setActivePluginRegistry(emptyPluginRegistry);
+    pluginRegistry = getActivePluginRegistry() ?? emptyPluginRegistry;
+    setActivePluginRegistry(pluginRegistry);
   }
   const channelLogs = Object.fromEntries(
     listChannelPlugins().map((plugin) => [plugin.id, logChannels.child(plugin.id)]),
