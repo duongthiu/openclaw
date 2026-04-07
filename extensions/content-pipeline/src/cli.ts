@@ -46,6 +46,12 @@ async function main() {
     case "bot":
       await handleBot(args.slice(1));
       break;
+    case "approve":
+      await handleApproveReject("approve", args[1]);
+      break;
+    case "reject":
+      await handleApproveReject("reject", args[1]);
+      break;
     default:
       console.error(`Unknown command: ${command}`);
       printHelp();
@@ -165,6 +171,50 @@ async function handleList() {
   }
 }
 
+async function handleApproveReject(action: string, runId?: string) {
+  const { readdirSync, readFileSync: rfs, existsSync } = await import("node:fs");
+  const { resolve } = await import("node:path");
+  const outputBase = resolve(__cliDir, "..", "output");
+
+  // Find pending approvals
+  const pending: Array<{ runId: string; outputDir: string; data: Record<string, unknown> }> = [];
+  try {
+    for (const dir of readdirSync(outputBase)) {
+      const f = resolve(outputBase, dir, "approval.json");
+      if (existsSync(f)) {
+        const data = JSON.parse(rfs(f, "utf-8"));
+        if (data.status === "pending")
+          pending.push({ runId: dir, outputDir: resolve(outputBase, dir), data });
+      }
+    }
+  } catch {}
+
+  if (pending.length === 0) {
+    console.log("No pending approvals.");
+    return;
+  }
+
+  const target = runId ? pending.find((p) => p.runId === runId) : pending[0];
+  if (!target) {
+    console.log(`Run "${runId}" not found. Pending: ${pending.map((p) => p.runId).join(", ")}`);
+    return;
+  }
+
+  const { getAllPendingApprovals, handleApproval, handleRejection } = await import("./approval.js");
+  getAllPendingApprovals().set(target.runId, target.data as never);
+
+  if (action === "approve") {
+    console.log(
+      `✅ Approving "${(target.data as Record<string, string>).videoTitle}" → uploading to platforms...`,
+    );
+    const results = await handleApproval(target.runId);
+    console.log("\nPublish results:", JSON.stringify(results, null, 2));
+  } else {
+    console.log(`❌ Rejecting "${(target.data as Record<string, string>).videoTitle}"`);
+    await handleRejection(target.runId);
+  }
+}
+
 async function handleBot(args: string[]) {
   const botType = args[0];
 
@@ -203,24 +253,30 @@ function printHelp() {
 Content Pipeline CLI
 
 Commands:
-  run news                          Run the news pipeline (scrape → video → upload)
-  run tutorial "topic"              Run the tutorial pipeline for a given topic
+  run news                          Run news pipeline (scrape → video → approval)
+  run tutorial "topic"              Run tutorial pipeline for a given topic
   preview                           Scrape and preview top articles
+  approve [runId]                   Approve pending video → publish to YT/FB/TikTok
+  reject [runId]                    Reject pending video
   list                              List recent pipeline runs
   bot discord                       Start Discord bot
   bot zalo                          Start Zalo webhook bot
 
 Options for 'run':
-  --stage <scrape|content|slides|video|upload>   Stop after this stage
-  --skip-upload                                   Produce video without uploading
+  --stage <scrape|content|slides|video>   Stop after this stage
+  --skip-upload                            Skip cloud upload + approval
+
+Workflow:
+  1. npx tsx src/cli.ts run news           # Creates video, sends to Discord for approval
+  2. Reply "approve" in #published-news    # Or: npx tsx src/cli.ts approve
+  3. Video uploads to YouTube/Facebook/TikTok automatically
 
 Examples:
   npx tsx src/cli.ts run news
-  npx tsx src/cli.ts run news --stage content
-  npx tsx src/cli.ts run news --skip-upload
+  npx tsx src/cli.ts approve
+  npx tsx src/cli.ts reject
   npx tsx src/cli.ts run tutorial "Getting started with Docker"
   npx tsx src/cli.ts preview
-  npx tsx src/cli.ts bot discord
 `);
 }
 

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import YAML from "yaml";
+import { requestApproval } from "./approval.js";
 import { generateNewsScript } from "./content/news-writer.js";
 import { generateTutorialScript } from "./content/tutorial-writer.js";
 import { discord } from "./discord-notify.js";
@@ -164,21 +165,22 @@ export async function runPipeline(opts: RunOptions, onEvent?: EventCallback) {
   await discord.status("☁️ Uploading to cloud storage...");
   const r2Urls = await uploadRunToR2(outputDir, runId);
 
-  if (shouldStop("video", opts.stopAtStage) || opts.skipUpload) {
-    const dur = `${Math.floor(videoResult.durationSeconds / 60)}m ${Math.floor(videoResult.durationSeconds % 60)}s`;
-    const r2Links = r2Urls["video_landscape.mp4"]
-      ? `\n🔗 Video: ${r2Urls["video_landscape.mp4"]}`
-      : "";
-    const publishChannel =
-      opts.pipelineType === "news" ? discord.publishedNews : discord.publishedTutorials;
-    await publishChannel(
-      `📹 **${content.videoTitle}**\n\n⏱️ Duration: ${dur}\n📊 ${content.slides.length} slides${r2Links}`,
-    );
-    await discord.status(`🎉 **Pipeline complete!** "${content.videoTitle}" — ${dur}${r2Links}`);
+  // Request approval via Discord buttons before publishing
+  const dur = `${Math.floor(videoResult.durationSeconds / 60)}m ${Math.floor(videoResult.durationSeconds % 60)}s`;
+  await discord.status(`✅ **Video ready!** Requesting your approval before publishing...`);
+  const approvalMsgId = await requestApproval({
+    runId,
+    outputDir,
+    videoTitle: content.videoTitle,
+    duration: dur,
+    slideCount: content.slides.length,
+    r2Urls,
+    pipelineType: opts.pipelineType,
+  });
 
-    console.log(`\nVideo ready. Output: ${outputDir}`);
-    return { outputDir, content, videoResult, r2Urls };
-  }
+  console.log(`\n🔔 Video ready. Approval requested in Discord. Output: ${outputDir}`);
+  console.log(`   Click Approve in Discord to publish to YouTube/Facebook/TikTok.`);
+  return { outputDir, content, videoResult, r2Urls, approvalMsgId };
 
   // ── Stage 5: Upload ──
   emit("upload", "started", "Uploading to platforms...");
