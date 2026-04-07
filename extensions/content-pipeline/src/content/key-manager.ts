@@ -125,6 +125,42 @@ export class KeyManager {
     return this.keys.filter((k) => k.provider === provider && !k.exhausted).length;
   }
 
+  /** Public method: generate a fresh Google API key on demand (called by LLM failover) */
+  async generateNewGoogleKey(): Promise<void> {
+    if (!this.config.google?.serviceAccountPath) {
+      throw new Error("No Google service account configured for auto key generation");
+    }
+
+    const { serviceAccountPath, projectIds } = this.config.google;
+    if (!existsSync(serviceAccountPath)) {
+      throw new Error(`Service account not found: ${serviceAccountPath}`);
+    }
+
+    const sa = JSON.parse(readFileSync(serviceAccountPath, "utf-8"));
+    const token = await this.getGoogleOAuthToken(sa);
+
+    // Try each project until one works
+    for (const projectId of projectIds) {
+      try {
+        const key = await this.createGoogleApiKey(projectId, token, Date.now());
+        if (key) {
+          this.keys.push({
+            provider: "google",
+            projectId,
+            key,
+            createdAt: Date.now(),
+            exhausted: false,
+          });
+          console.log(`  🔑 Auto-generated new Google key in project ${projectId}`);
+          return;
+        }
+      } catch (err) {
+        console.warn(`  🔑 Key gen failed in ${projectId}: ${(err as Error).message.slice(0, 80)}`);
+      }
+    }
+    throw new Error("Failed to generate key in any project");
+  }
+
   // ── Google Cloud API Key Generation ──
 
   private async generateGoogleKeys(): Promise<void> {

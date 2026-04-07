@@ -38,7 +38,7 @@ content:
   fallbackModels:
     - "groq/llama-3.3-70b-versatile"
     - "openrouter/meta-llama/llama-3.3-70b-instruct:free"
-    - "cerebras/llama-3.3-70b"
+    - "cerebras/llama3.1-8b"
   topStories: 5
   language: "en"
   tone: "energetic"
