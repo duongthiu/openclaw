@@ -9,6 +9,7 @@ import { generateTutorialScript } from "./content/tutorial-writer.js";
 import { discord } from "./discord-notify.js";
 import { scrapeAll } from "./scraper/index.js";
 import { renderSlides } from "./slides/renderer.js";
+import { uploadRunToR2 } from "./storage.js";
 import type { PipelineConfig, VideoContent, UploadResult, Article } from "./types.js";
 import { uploadToFacebook } from "./upload/facebook.js";
 import { uploadToTiktok } from "./upload/tiktok.js";
@@ -157,19 +158,26 @@ export async function runPipeline(opts: RunOptions, onEvent?: EventCallback) {
     `✅ **Stage 4/4 complete**: Video ready (${Math.floor(videoResult.durationSeconds / 60)}m ${Math.floor(videoResult.durationSeconds % 60)}s)`,
   );
 
+  // Upload to R2 cloud storage
+  const runId = outputDir.split("/").pop() ?? "unknown";
+  console.log("\n☁️ Uploading to R2 cloud storage...");
+  await discord.status("☁️ Uploading to cloud storage...");
+  const r2Urls = await uploadRunToR2(outputDir, runId);
+
   if (shouldStop("video", opts.stopAtStage) || opts.skipUpload) {
-    // Post completion to #published-news or #published-tutorials
+    const dur = `${Math.floor(videoResult.durationSeconds / 60)}m ${Math.floor(videoResult.durationSeconds % 60)}s`;
+    const r2Links = r2Urls["video_landscape.mp4"]
+      ? `\n🔗 Video: ${r2Urls["video_landscape.mp4"]}`
+      : "";
     const publishChannel =
       opts.pipelineType === "news" ? discord.publishedNews : discord.publishedTutorials;
     await publishChannel(
-      `📹 **${content.videoTitle}**\n\n⏱️ Duration: ${Math.floor(videoResult.durationSeconds / 60)}m ${Math.floor(videoResult.durationSeconds % 60)}s\n📊 ${content.slides.length} slides\n📁 Output: \`${outputDir}\``,
+      `📹 **${content.videoTitle}**\n\n⏱️ Duration: ${dur}\n📊 ${content.slides.length} slides${r2Links}`,
     );
-    await discord.status(
-      `🎉 **Pipeline complete!** "${content.videoTitle}" — ${Math.floor(videoResult.durationSeconds / 60)}m ${Math.floor(videoResult.durationSeconds % 60)}s`,
-    );
+    await discord.status(`🎉 **Pipeline complete!** "${content.videoTitle}" — ${dur}${r2Links}`);
 
     console.log(`\nVideo ready. Output: ${outputDir}`);
-    return { outputDir, content, videoResult };
+    return { outputDir, content, videoResult, r2Urls };
   }
 
   // ── Stage 5: Upload ──
