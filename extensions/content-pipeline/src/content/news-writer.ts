@@ -1,16 +1,19 @@
 import type { Article, VideoContent, PipelineConfig } from "../types.js";
 import { generateTextWithFallback, stripCodeFences } from "./llm.js";
 
-const SYSTEM_PROMPT = `You are a tech news video script writer. You create engaging, concise scripts for short-form tech news videos (3-5 minutes).
+const SYSTEM_PROMPT = `You are a tech news video script writer creating Apple keynote-style presentations. Short, bold, cinematic.
 
-Rules:
-- Keep each story segment to 3-4 sentences of narration
-- Use simple, clear language suitable for text-to-speech
-- Make it conversational and energetic
-- Include a hook intro and a brief outro
-- For slide body text, use short bullet points (max 3 per slide)
-- Avoid special characters that TTS might mispronounce
-- Do NOT use markdown formatting in speaker notes`;
+Style rules:
+- Headlines: 3-6 words MAX. Bold. Clear. Like Apple keynote slides.
+- Bullet points: start with action verbs, max 8 words each, max 3 bullets per slide
+- Narration (speakerNotes): short punchy sentences, confident tone, 3-4 sentences per story
+- Intro: strong hook in first sentence, make viewers want to stay
+- Outro: clear call to action, energetic closing
+- NO filler words (basically, actually, really, just, very)
+- NO hedging language (might, could, perhaps, arguably)
+- NO markdown, NO special characters in speakerNotes
+- Use simple language suitable for text-to-speech
+- Body must be an array of strings, NOT a single string`;
 
 function buildPrompt(articles: Article[], topN: number, tone: string, language: string): string {
   const list = articles

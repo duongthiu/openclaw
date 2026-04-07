@@ -1,7 +1,6 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { dirname } from "node:path";
+import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 import { requestApproval } from "./approval.js";
@@ -9,14 +8,10 @@ import { generateNewsScript } from "./content/news-writer.js";
 import { generateTutorialScript } from "./content/tutorial-writer.js";
 import { discord } from "./discord-notify.js";
 import { scrapeAll } from "./scraper/index.js";
-import { renderSlides } from "./slides/renderer.js";
 import { uploadRunToR2 } from "./storage.js";
 import type { PipelineConfig, VideoContent, UploadResult, Article } from "./types.js";
-import { uploadToFacebook } from "./upload/facebook.js";
-import { uploadToTiktok } from "./upload/tiktok.js";
-import { uploadToYoutube } from "./upload/youtube.js";
-import { composeVideo } from "./video/composer.js";
-import { generateTts } from "./video/tts.js";
+import { generateTtsAudio, concatenateAudio } from "./video/kokoro-tts.js";
+import { getWordTimestamps } from "./video/subtitles.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -28,6 +23,7 @@ export interface RunOptions {
   stopAtStage?: Stage;
   skipUpload?: boolean;
   configPath?: string;
+  legacy?: boolean; // Use old Playwright+ffmpeg pipeline
 }
 
 export function loadConfig(configPath?: string): PipelineConfig {
@@ -60,7 +56,6 @@ export async function runPipeline(opts: RunOptions, onEvent?: EventCallback) {
     onEvent?.({ stage, status, message });
   };
 
-  // Notify Discord: pipeline started
   await discord.status(
     `🎯 **Pipeline started** — ${opts.pipelineType === "news" ? "Daily News Video" : `Tutorial: ${opts.topic}`}`,
   );
@@ -69,13 +64,12 @@ export async function runPipeline(opts: RunOptions, onEvent?: EventCallback) {
   let articles: Article[] = [];
   if (opts.pipelineType === "news") {
     emit("scrape", "started", "Scraping tech news...");
-    await discord.status("📰 **Stage 1/4**: hana is scraping tech news sources...");
+    await discord.status("📰 **Stage 1/4**: Scraping tech news sources...");
 
     articles = await scrapeAll(config.sources);
     await writeFile(join(outputDir, "articles.json"), JSON.stringify(articles, null, 2));
     emit("scrape", "completed", `${articles.length} articles scraped`);
 
-    // Post article digest to #scraped-articles
     const top10 = articles
       .slice(0, 10)
       .map((a, i) => `**${i + 1}.** ${a.title} *(${a.source})*`)
@@ -93,7 +87,7 @@ export async function runPipeline(opts: RunOptions, onEvent?: EventCallback) {
 
   // ── Stage 2: Content ──
   emit("content", "started", "Generating content...");
-  await discord.status("✍️ **Stage 2/4**: minh is writing the video script...");
+  await discord.status("✍️ **Stage 2/4**: Writing video script...");
 
   let content: VideoContent;
   if (opts.pipelineType === "news") {
@@ -105,7 +99,6 @@ export async function runPipeline(opts: RunOptions, onEvent?: EventCallback) {
   await writeFile(join(outputDir, "script.json"), JSON.stringify(content, null, 2));
   emit("content", "completed", `Script: "${content.videoTitle}"`);
 
-  // Post script to #scripts
   await discord.script(
     `✍️ **Script Ready:** "${content.videoTitle}"\n\n📝 Slides: ${content.slides.length}\n🏷️ Tags: ${content.tags?.join(", ") ?? "none"}`,
   );
@@ -118,56 +111,112 @@ export async function runPipeline(opts: RunOptions, onEvent?: EventCallback) {
     return { outputDir, content };
   }
 
-  // ── Stage 3: Slides ──
-  emit("slides", "started", "Rendering slides...");
-  await discord.status("🎨 **Stage 3/4**: kai is rendering slides...");
+  // ── Stage 3: TTS Audio ──
+  emit("slides", "started", "Generating TTS audio...");
+  await discord.status("🎙️ **Stage 3/4**: Generating voice narration...");
 
-  const slidePaths = await renderSlides(content, outputDir, config.slides);
-  emit("slides", "completed", `${slidePaths.length} slides rendered`);
+  const audioSegments = await generateTtsAudio(content.slides, outputDir, config.video);
+  const totalDur = audioSegments.reduce((s, a) => s + a.durationSeconds, 0);
 
-  // Post slide images to #slide-preview
-  for (let i = 0; i < slidePaths.length; i++) {
-    await discord.slideImage(
-      slidePaths[i],
-      `🎨 Slide ${i + 1}/${slidePaths.length}: ${content.slides[i]?.title ?? ""}`,
-    );
-  }
-  await discord.status(`✅ **Stage 3/4 complete**: ${slidePaths.length} slides rendered`);
+  // Concatenate all audio for WhisperX
+  const combinedAudioPath = join(outputDir, "combined-audio.wav");
+  await concatenateAudio(audioSegments, combinedAudioPath);
+
+  // Get word-level timestamps
+  const words = await getWordTimestamps(combinedAudioPath, outputDir);
+
+  await discord.status(
+    `✅ **Stage 3/4 complete**: ${audioSegments.length} audio segments (${Math.floor(totalDur / 60)}m ${Math.floor(totalDur % 60)}s), ${words.length} word timestamps`,
+  );
 
   if (shouldStop("slides", opts.stopAtStage)) {
-    console.log(`\nStopped after slides. Output: ${outputDir}`);
-    return { outputDir, content, slidePaths };
+    console.log(`\nStopped after TTS. Output: ${outputDir}`);
+    return { outputDir, content, audioSegments, words };
   }
 
-  // ── Stage 4: Video ──
-  emit("video", "started", "Producing video...");
-  await discord.status("🎬 **Stage 4/4**: kai is producing the video (TTS + ffmpeg)...");
+  // ── Stage 4: Render Video with Remotion ──
+  emit("video", "started", "Rendering video with Remotion...");
+  await discord.status("🎬 **Stage 4/4**: Rendering Apple-style video with Remotion...");
 
-  const audioSegments = await generateTts(content.slides, outputDir, config.video);
-  const totalDur = audioSegments.reduce((s, a) => s + a.durationSeconds, 0);
+  const fps = config.video.fps ?? 30;
+
+  // Calculate frame durations from audio
+  const slidesWithFrames = content.slides.map((slide, i) => ({
+    ...slide,
+    durationFrames: Math.max(60, Math.ceil((audioSegments[i]?.durationSeconds ?? 5) * fps)),
+  }));
+
+  const videoLandscapePath = join(outputDir, "video_landscape.mp4");
+
+  try {
+    // Dynamic import to avoid loading Remotion at startup
+    const { renderVideo } = await import("./remotion/render.js");
+
+    await renderVideo(
+      {
+        slides: slidesWithFrames,
+        audioPath: combinedAudioPath,
+        words,
+        fps,
+      },
+      videoLandscapePath,
+      (pct) => {
+        if (pct % 25 === 0) console.log(`  Rendering: ${pct}%`);
+      },
+    );
+  } catch (err) {
+    console.error(`  ❌ Remotion render failed: ${(err as Error).message}`);
+    await discord.status(`❌ Remotion render failed: ${(err as Error).message.slice(0, 100)}`);
+    return { outputDir, content, audioSegments };
+  }
+
+  // Get video duration
+  const { exec: execCb } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const execAsync = promisify(execCb);
+  let videoDuration = totalDur;
+  try {
+    const { stdout } = await execAsync(
+      `ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${videoLandscapePath}"`,
+    );
+    videoDuration = parseFloat(stdout.trim()) || totalDur;
+  } catch {}
+
+  // Create portrait version (9:16) with blurred background
+  const videoPortraitPath = join(outputDir, "video_portrait.mp4");
+  try {
+    await execAsync(
+      `ffmpeg -y -i "${videoLandscapePath}" -vf "split[original][blur];[blur]scale=1080:1920,boxblur=20[bg];[bg][original]overlay=(W-w)/2:(H-h)/2" -c:a copy -r ${fps} "${videoPortraitPath}"`,
+      { timeout: 300_000 },
+    );
+  } catch {
+    console.warn("  ⚠ Portrait version failed, skipping");
+  }
+
+  const videoResult = {
+    landscapePath: videoLandscapePath,
+    portraitPath: videoPortraitPath,
+    durationSeconds: videoDuration,
+    subtitlePath: join(outputDir, "word-timestamps.json"),
+  };
+
+  const dur = `${Math.floor(videoDuration / 60)}m ${Math.floor(videoDuration % 60)}s`;
+
   await discord.videoProgress(
-    `🎙️ TTS complete: ${audioSegments.length} audio segments (${Math.floor(totalDur / 60)}m ${Math.floor(totalDur % 60)}s)`,
+    `🎬 **Video rendered!**\n📐 Landscape: 1920x1080\n📱 Portrait: 1080x1920\n⏱️ Duration: ${dur}`,
   );
+  await discord.status(`✅ **Stage 4/4 complete**: Video ready (${dur})`);
 
-  const videoResult = await composeVideo(slidePaths, audioSegments, outputDir, config.video);
-  emit("video", "completed", `Video: ${Math.floor(videoResult.durationSeconds / 60)}m`);
+  emit("video", "completed", `Video: ${dur}`);
 
-  await discord.videoProgress(
-    `🎬 **Video composed!**\n📐 Landscape: 1920x1080\n📱 Portrait: 1080x1920\n⏱️ Duration: ${Math.floor(videoResult.durationSeconds / 60)}m ${Math.floor(videoResult.durationSeconds % 60)}s`,
-  );
-  await discord.status(
-    `✅ **Stage 4/4 complete**: Video ready (${Math.floor(videoResult.durationSeconds / 60)}m ${Math.floor(videoResult.durationSeconds % 60)}s)`,
-  );
-
-  // Upload to R2 cloud storage
+  // Upload to R2
   const runId = outputDir.split("/").pop() ?? "unknown";
   console.log("\n☁️ Uploading to R2 cloud storage...");
   await discord.status("☁️ Uploading to cloud storage...");
   const r2Urls = await uploadRunToR2(outputDir, runId);
 
-  // Request approval via Discord buttons before publishing
-  const dur = `${Math.floor(videoResult.durationSeconds / 60)}m ${Math.floor(videoResult.durationSeconds % 60)}s`;
-  await discord.status(`✅ **Video ready!** Requesting your approval before publishing...`);
+  // Request approval
+  await discord.status(`✅ **Video ready!** Requesting your approval...`);
   const approvalMsgId = await requestApproval({
     runId,
     outputDir,
@@ -179,72 +228,6 @@ export async function runPipeline(opts: RunOptions, onEvent?: EventCallback) {
   });
 
   console.log(`\n🔔 Video ready. Approval requested in Discord. Output: ${outputDir}`);
-  console.log(`   Click Approve in Discord to publish to YouTube/Facebook/TikTok.`);
+  console.log(`   Click Approve in Discord or run: npx tsx src/cli.ts approve`);
   return { outputDir, content, videoResult, r2Urls, approvalMsgId };
-
-  // ── Stage 5: Upload ──
-  emit("upload", "started", "Uploading to platforms...");
-  await discord.status("📤 **Stage 5/5**: Uploading to platforms...");
-  const uploads: UploadResult[] = [];
-
-  if (config.upload.youtube.enabled) {
-    try {
-      const url = await uploadToYoutube(
-        videoResult,
-        content,
-        config.upload.youtube,
-        "client_secrets.json",
-      );
-      uploads.push({ platform: "youtube", url, status: "success" });
-    } catch (err) {
-      uploads.push({ platform: "youtube", status: "error", error: (err as Error).message });
-    }
-  }
-
-  if (config.upload.tiktok.enabled) {
-    try {
-      await uploadToTiktok(videoResult, content, config.upload.tiktok.cookiesPath);
-      uploads.push({ platform: "tiktok", status: "success" });
-    } catch (err) {
-      uploads.push({ platform: "tiktok", status: "error", error: (err as Error).message });
-    }
-  }
-
-  if (config.upload.facebook.enabled) {
-    const fbToken = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
-    if (fbToken && config.upload.facebook.pageId) {
-      try {
-        const url = await uploadToFacebook(
-          videoResult,
-          content,
-          config.upload.facebook.pageId,
-          fbToken,
-        );
-        uploads.push({ platform: "facebook", url, status: "success" });
-      } catch (err) {
-        uploads.push({ platform: "facebook", status: "error", error: (err as Error).message });
-      }
-    }
-  }
-
-  await writeFile(join(outputDir, "upload_results.json"), JSON.stringify(uploads, null, 2));
-  emit("upload", "completed", uploads.map((u) => `${u.platform}: ${u.status}`).join(", "));
-
-  const uploadLines = uploads
-    .map((u) =>
-      u.url
-        ? `✅ ${u.platform}: ${u.url}`
-        : `${u.status === "success" ? "✅" : "❌"} ${u.platform}: ${u.status}`,
-    )
-    .join("\n");
-
-  const publishChannel =
-    opts.pipelineType === "news" ? discord.publishedNews : discord.publishedTutorials;
-  await publishChannel(
-    `📹 **${content.videoTitle}**\n\n⏱️ Duration: ${Math.floor(videoResult.durationSeconds / 60)}m ${Math.floor(videoResult.durationSeconds % 60)}s\n📊 ${content.slides.length} slides\n\n${uploadLines}`,
-  );
-  await discord.status(`🎉 **Pipeline complete!** "${content.videoTitle}"\n${uploadLines}`);
-
-  console.log(`\n✅ Pipeline complete! Output: ${outputDir}`);
-  return { outputDir, content, videoResult, uploads };
 }

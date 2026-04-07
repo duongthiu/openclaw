@@ -70,10 +70,14 @@ slides:
 # ── Video ──
 video:
   durationPerSlide: 8
-  ttsVoice: "en-US-AndrewNeural"
+  ttsEngine: "kokoro"          # "kokoro" (local, natural) | "edge-tts" (cloud, fallback)
+  ttsVoice: "af_heart"         # Kokoro: af_heart, am_michael | edge-tts: en-US-AndrewNeural
+  ttsSpeed: 1.0
   width: 1920
   height: 1080
   fps: 30
+  backgroundMusic: ""          # Path to background music MP3 (optional)
+  musicVolume: 0.15
 
 # ── Upload ──
 upload:
