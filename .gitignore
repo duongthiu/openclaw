@@ -147,3 +147,4 @@ changelog/fragments/
 .tmp/
 test/fixtures/openclaw-vitest-unit-report.json
 analysis/
+client_secrets.json
