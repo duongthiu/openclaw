@@ -160,24 +160,38 @@ export async function handleApproval(runId: string): Promise<Record<string, stri
     );
   }
 
-  // Facebook
+  // Facebook — share YouTube link to Page (video upload requires app review)
   try {
     const pageId = process.env.FACEBOOK_PAGE_ID;
     const pageToken = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
+    const youtubeUrl = results.youtube;
     if (pageId && pageToken) {
-      const { uploadToFacebook } = await import("./upload/facebook.js");
       const content = JSON.parse(readFileSync(join(req.outputDir, "script.json"), "utf-8"));
-      const videoResult = {
-        landscapePath: join(req.outputDir, "video_landscape.mp4"),
-        portraitPath: join(req.outputDir, "video_portrait.mp4"),
-        durationSeconds: 0,
-        subtitlePath: "",
+      const message = `🎬 ${content.videoTitle}\n\n${content.videoDescription ?? ""}\n\n${content.tags?.map((t: string) => `#${t.replace(/\s+/g, "")}`).join(" ") ?? ""}`;
+
+      const postBody: Record<string, string> = {
+        access_token: pageToken,
+        message,
       };
-      if (existsSync(videoResult.landscapePath)) {
-        const url = await uploadToFacebook(videoResult, content, pageId, pageToken);
-        results.facebook = url;
-        await postToChannel(CHANNELS.teamStatus, `  ✅ Facebook: ${url}`);
+      if (youtubeUrl && youtubeUrl.startsWith("http")) {
+        postBody.link = youtubeUrl;
       }
+
+      const resp = await fetch(`https://graph.facebook.com/v25.0/${pageId}/feed`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams(postBody).toString(),
+      });
+
+      if (!resp.ok) {
+        const err = await resp.text();
+        throw new Error(err.slice(0, 100));
+      }
+
+      const data = (await resp.json()) as { id?: string };
+      const fbUrl = `https://facebook.com/${data.id}`;
+      results.facebook = fbUrl;
+      await postToChannel(CHANNELS.teamStatus, `  ✅ Facebook: ${fbUrl}`);
     }
   } catch (err) {
     results.facebook = `error: ${(err as Error).message.slice(0, 100)}`;
