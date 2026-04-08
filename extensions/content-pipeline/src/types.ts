@@ -11,12 +11,59 @@ export interface Article {
 
 export interface SlideContent {
   slideType: "intro" | "story" | "outro" | "title" | "step" | "code";
+  /** Slot label inside the SLIDE_ARC ("Intro" / "What Happened" / "Background" / "Key Details" / "Analysis" / "Why It Matters" / "Outro"). Drives A-roll picker. */
+  slideRole?: string;
   title: string;
   body: string;
   speakerNotes: string;
   sourceUrl?: string;
   code?: string;
   language?: string;
+  /** P0.A: short standalone facts/numbers extracted by the script LLM, used as kinetic StatCards. e.g. ["1.200 router bị xâm nhập", "GRU đứng sau"] */
+  keyStats?: string[];
+  /** P0.A: short attributable quotes used as QuoteCards. */
+  keyQuotes?: Array<{ text: string; attribution?: string }>;
+}
+
+// ── P0.A: A-roll / B-roll visual planning ──
+
+/** Whether a visual is the slide's primary anchor (a-roll) or a supporting cutaway (b-roll). */
+export type VisualRole = "a-roll" | "b-roll";
+
+/** What kind of visual element this item is. Drives which Remotion component renders it. */
+export type VisualKind =
+  /** A-roll types */
+  | "title-card"
+  | "stat-card"
+  | "quote-card"
+  | "article-scroll"
+  | "timeline-card"
+  /** B-roll types */
+  | "wikipedia"
+  | "logo"
+  | "pexels-photo"
+  | "pexels-video"
+  | "screenshot";
+
+export interface VisualItem {
+  role: VisualRole;
+  kind: VisualKind;
+  /** Local file path (for image / video items). Empty for pure text cards. */
+  path?: string;
+  /** Text payload (for title/stat/quote/timeline cards). */
+  text?: string;
+  /** Optional secondary text (e.g. quote attribution, stat label). */
+  subtext?: string;
+  /** This item's share of the slide's total audio duration (seconds). */
+  durationSec: number;
+  /** Optional caption / source attribution shown small. */
+  caption?: string;
+}
+
+export interface VisualPlan {
+  slideIndex: number;
+  /** Ordered sequence of visuals to play across the slide's audio duration. Sum of items[].durationSec ≈ audioSegments[slideIndex].durationSeconds. */
+  items: VisualItem[];
 }
 
 export interface VideoContent {

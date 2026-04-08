@@ -12,7 +12,14 @@ import { IntroSlide } from "./components/IntroSlide";
 import { OutroSlide } from "./components/OutroSlide";
 import { StorySlide } from "./components/StorySlide";
 import { WordCaption } from "./components/WordCaption";
-import type { VideoProps, SlideData } from "./types";
+import { TitleCard } from "./components/TitleCard";
+import { StatCard } from "./components/StatCard";
+import { QuoteCard } from "./components/QuoteCard";
+import { ArticleScroll } from "./components/ArticleScroll";
+import { TimelineCard } from "./components/TimelineCard";
+import { KenBurnsImage } from "./components/KenBurnsImage";
+import { Typewriter } from "./components/Typewriter";
+import type { VideoProps, SlideData, VisualPlan, VisualItem } from "./types";
 
 function parseBody(body: string | string[]): string[] {
   if (Array.isArray(body)) return body;
@@ -144,16 +151,177 @@ const BrollSlide: React.FC<{ brollPath: string; title: string }> = ({ brollPath,
   );
 };
 
+/**
+ * P0.A — Render a single VisualItem with the right component + Ken Burns motion.
+ * Used inside <VisualSequence> below; takes the duration in frames the item
+ * occupies inside its parent <Sequence> so motion components can compute their
+ * envelopes.
+ */
+const VisualItemRenderer: React.FC<{ item: VisualItem; durationInFrames: number; index: number }> = ({
+  item,
+  durationInFrames,
+  index,
+}) => {
+  switch (item.kind) {
+    case "title-card":
+      return <TitleCard title={item.text ?? ""} subtitle={item.subtext} />;
+    case "stat-card":
+      return <StatCard text={item.text ?? ""} subtext={item.subtext} />;
+    case "quote-card":
+      return <QuoteCard text={item.text ?? ""} subtext={item.subtext} />;
+    case "article-scroll":
+      if (!item.path) return <TitleCard title={item.text ?? ""} subtitle={item.subtext} />;
+      return (
+        <ArticleScroll
+          src={item.path}
+          title={item.text ?? ""}
+          subtext={item.subtext}
+          durationInFrames={durationInFrames}
+        />
+      );
+    case "timeline-card":
+      return <TimelineCard text={item.text ?? ""} subtext={item.subtext} />;
+    case "wikipedia":
+    case "pexels-photo":
+    case "screenshot":
+      if (!item.path) return null;
+      return (
+        <KenBurnsImage
+          src={item.path}
+          durationInFrames={durationInFrames}
+          variant={(["in", "out", "left", "right"] as const)[index % 4]}
+          fit="cover"
+          caption={item.caption}
+        />
+      );
+    case "logo":
+      if (!item.path) return null;
+      return <LogoCard src={item.path} caption={item.caption} durationInFrames={durationInFrames} />;
+    case "pexels-video":
+      if (!item.path) return null;
+      return (
+        <AbsoluteFill style={{ background: "#000" }}>
+          <OffthreadVideo src={staticFile(item.path)} muted />
+          <AbsoluteFill
+            style={{
+              background:
+                "linear-gradient(180deg, rgba(0,0,0,0.4) 0%, rgba(0,0,0,0) 25%, rgba(0,0,0,0) 75%, rgba(0,0,0,0.55) 100%)",
+            }}
+          />
+        </AbsoluteFill>
+      );
+    default:
+      return null;
+  }
+};
+
+/** Centered logo on dark gradient background, with spring scale-in. */
+const LogoCard: React.FC<{ src: string; caption?: string; durationInFrames: number }> = ({
+  src,
+  caption,
+}) => {
+  const frame = useCurrentFrame();
+  // Subtle scale and opacity entrance using interpolate (kept lightweight)
+  const scale = interpolate(frame, [0, 18], [0.8, 1], { extrapolateRight: "clamp" });
+  const opacity = interpolate(frame, [0, 12], [0, 1], { extrapolateRight: "clamp" });
+  return (
+    <AbsoluteFill
+      style={{
+        background:
+          "linear-gradient(135deg, #0a0a0a 0%, #181830 50%, #0a0a0a 100%)",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 32,
+      }}
+    >
+      <img
+        src={src.startsWith("http") || src.startsWith("file:") ? src : staticFile(src)}
+        alt={caption ?? "logo"}
+        style={{
+          maxWidth: "55%",
+          maxHeight: "55%",
+          objectFit: "contain",
+          transform: `scale(${scale})`,
+          opacity,
+          filter: "drop-shadow(0 8px 32px rgba(0,0,0,0.6))",
+        }}
+      />
+      {caption && (
+        <div
+          style={{
+            opacity,
+            fontFamily: "-apple-system, 'SF Pro Text', 'Inter', sans-serif",
+            fontWeight: 600,
+            fontSize: 32,
+            color: "rgba(255,255,255,0.85)",
+            letterSpacing: 0.5,
+          }}
+        >
+          <Typewriter text={caption} startFrame={14} />
+        </div>
+      )}
+    </AbsoluteFill>
+  );
+};
+
+/**
+ * P0.A — Render a per-slide VisualPlan as a sequence of items.
+ * Each item gets its own <Sequence> sized to its share of the slide's audio
+ * duration. Items render in order with hard cuts between them (the inner
+ * components handle their own spring/typewriter entrances so cuts feel alive).
+ */
+const VisualSequence: React.FC<{ plan: VisualPlan; slideDurationInFrames: number; fps: number }> = ({
+  plan,
+  slideDurationInFrames,
+  fps,
+}) => {
+  if (!plan.items || plan.items.length === 0) return null;
+
+  // Convert each item's durationSec to frames; renormalize to fit the slide
+  const totalRequestedSec = plan.items.reduce((s, it) => s + Math.max(0.1, it.durationSec), 0);
+  const totalAvailFrames = slideDurationInFrames;
+  const scale = totalRequestedSec > 0 ? totalAvailFrames / (totalRequestedSec * fps) : 1;
+
+  let frameOffset = 0;
+  const rendered: React.ReactNode[] = [];
+  for (let i = 0; i < plan.items.length; i++) {
+    const item = plan.items[i];
+    const wantedFrames = Math.max(20, Math.round(item.durationSec * fps * scale));
+    // Clamp the last item to fill any remainder
+    const remainingFrames = totalAvailFrames - frameOffset;
+    const itemFrames = i === plan.items.length - 1 ? remainingFrames : Math.min(wantedFrames, remainingFrames);
+    if (itemFrames <= 0) break;
+
+    rendered.push(
+      <Sequence key={i} from={frameOffset} durationInFrames={itemFrames}>
+        <VisualItemRenderer item={item} durationInFrames={itemFrames} index={i} />
+      </Sequence>,
+    );
+    frameOffset += itemFrames;
+  }
+  return <>{rendered}</>;
+};
+
 export const NewsVideo: React.FC<VideoProps> = ({
   slides,
   audioPath,
   words,
   brollPaths,
+  visualPlans,
   musicPath,
   musicVolume = 0.15,
+  fps = 30,
 }) => {
   // Calculate frame offsets for each slide
   let frameOffset = 0;
+
+  // Build a slideIndex → VisualPlan map for O(1) lookup
+  const planByIndex = new Map<number, VisualPlan>();
+  if (visualPlans) {
+    for (const p of visualPlans) planByIndex.set(p.slideIndex, p);
+  }
 
   return (
     <AbsoluteFill style={{ background: "#000" }}>
@@ -163,17 +331,27 @@ export const NewsVideo: React.FC<VideoProps> = ({
       {/* Background music */}
       {musicPath && <Audio src={staticFile(musicPath)} volume={musicVolume} loop />}
 
-      {/* Slides with fade transitions. If a per-slide brollPath is provided,
-          render the b-roll clip as a full-bleed background with a title chip;
-          otherwise fall back to the branded slide components. */}
+      {/* Slides with fade transitions.
+          P0.A: render priority per slide:
+            1. visualPlans[i] → render the A-roll/B-roll sequence (NEW)
+            2. brollPaths[i]  → render the legacy single full-bleed Pexels clip
+            3. fallback       → branded slide component (Intro/Story/Outro) */}
       {slides.map((slide, i) => {
         const from = frameOffset;
         frameOffset += slide.durationFrames;
+        const plan = planByIndex.get(i);
+        const hasPlan = plan && plan.items && plan.items.length > 0;
         const brollPath = brollPaths?.[i];
         return (
           <Sequence key={i} from={from} durationInFrames={slide.durationFrames}>
             <FadeSlide durationInFrames={slide.durationFrames}>
-              {brollPath ? (
+              {hasPlan ? (
+                <VisualSequence
+                  plan={plan as VisualPlan}
+                  slideDurationInFrames={slide.durationFrames}
+                  fps={fps}
+                />
+              ) : brollPath ? (
                 <BrollSlide brollPath={brollPath} title={slide.title} />
               ) : (
                 renderSlide(slide, i, slides.length)

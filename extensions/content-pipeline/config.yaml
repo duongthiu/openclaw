@@ -69,14 +69,15 @@ sources:
 # Model format: "provider/model-name"
 # Failover: tries each model in order. On rate limit → next model.
 content:
-  model: "ollama/gemma4"
+  # Vietnamese run: gemini-2.5-flash is primary (best Vietnamese), gemma4 stays as fallback
+  model: "google/gemini-2.5-flash"
   fallbackModels:
-    - "google/gemini-2.5-flash"
+    - "ollama/gemma4"
     - "groq/llama-3.3-70b-versatile"
     - "openrouter/meta-llama/llama-3.3-70b-instruct:free"
     - "cerebras/llama3.1-8b"
   topStories: 5
-  language: "en"
+  language: "vi"
   tone: "energetic"
   # Candidate-pool sizing (Step 1)
   poolSize: 30          # final pool after dedup + per-source cap
@@ -125,16 +126,16 @@ video:
   durationPerSlide: 8
   # TTS (Step 5) — split per engine so Kokoro and edge-tts voices don't collide
   tts:
-    engine: "kokoro"             # "kokoro" (local, natural) | "edge-tts" (cloud, fallback)
+    engine: "edge-tts"           # Vietnamese run — Kokoro doesn't support vi, edge-tts has vi-VN neural voices
     kokoro:
       voice: "af_heart"          # af_heart, am_michael, bf_emma, bm_george
       speed: 1.0
     edgeTts:
-      voice: "en-US-AndrewNeural"
+      voice: "vi-VN-HoaiMyNeural"  # vi-VN-HoaiMyNeural (female), vi-VN-NamMinhNeural (male)
     chunkBySentence: true        # split long narration into sentence-sized TTS calls
   # Legacy flat fields kept for back-compat — read only when `tts` is not set
-  ttsEngine: "kokoro"
-  ttsVoice: "af_heart"
+  ttsEngine: "edge-tts"
+  ttsVoice: "vi-VN-HoaiMyNeural"
   ttsSpeed: 1.0
   width: 1920
   height: 1080

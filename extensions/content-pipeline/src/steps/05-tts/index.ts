@@ -20,14 +20,21 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { AudioSegment, PipelineConfig, SlideContent } from "../../types.js";
-import { edgeTtsAdapter, kokoroTts, type TtsEngineResult } from "./engines.js";
+import { edgeTtsAdapter, gttsAdapter, kokoroTts, type TtsEngineResult } from "./engines.js";
 import { sanitizeForTts, splitSentences } from "./sanitize.js";
 
 const execAsync = promisify(exec);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCRIPTS_DIR = join(__dirname, "..", "..", "..", "scripts");
 const KOKORO_SCRIPT = join(SCRIPTS_DIR, "kokoro-generate.py");
+const GTTS_SCRIPT = join(SCRIPTS_DIR, "gtts-generate.py");
 const KOKORO_MODEL_PATH = join(homedir(), ".openclaw", "models", "kokoro-v1.0.onnx");
+
+/** Map an edge-tts voice name to its language code (e.g. "vi-VN-HoaiMyNeural" → "vi"). */
+function voiceToLang(voice: string): string {
+  const m = voice.match(/^([a-z]{2})-/i);
+  return m ? m[1].toLowerCase() : "en";
+}
 
 type TtsEngine = "kokoro" | "edge-tts";
 
@@ -179,6 +186,19 @@ export async function generateTtsAudio(
           console.warn(
             `  ✗ ${effectiveFallback} also failed: ${(fbErr as Error).message.slice(0, 120)}`,
           );
+          // ── 3rd-level fallback: gTTS (Google Translate TTS) ──
+          // Much more reliable than edge-tts vi-VN. Less expressive voice
+          // but always returns audio. Auto-derives language from edgeTtsVoice.
+          try {
+            const lang = voiceToLang(cfg.edgeTtsVoice || "en-US");
+            await gttsAdapter(chunkText, chunkPath, { lang, scriptPath: GTTS_SCRIPT });
+            ok = true;
+            console.log(`    ↳ recovered via gTTS (lang=${lang})`);
+          } catch (gErr) {
+            console.warn(
+              `  ✗ gTTS also failed: ${(gErr as Error).message.slice(0, 120)}`,
+            );
+          }
         }
       }
 

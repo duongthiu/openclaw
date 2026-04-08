@@ -16,6 +16,7 @@ import { generateAiVideoClips, composeAiVideo } from "./steps/06-video/ai-video.
 import { generateBrollClips, composeBrollVideo } from "./steps/06-video/broll.js";
 import { optimizePrompts } from "./steps/06-video/prompt-optimizer.js";
 import { getWordTimestamps } from "./steps/06-video/subtitles.js";
+import { researchVisuals } from "./steps/06-video/visual-research.js";
 import { uploadRunToR2 } from "./storage.js";
 import type {
   PipelineConfig,
@@ -25,6 +26,7 @@ import type {
   FullArticle,
   SelectedConcept,
   VideoEngine,
+  VisualPlan,
 } from "./types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -285,12 +287,32 @@ export async function runPipeline(opts: RunOptions, onEvent?: EventCallback) {
 
   if (effectiveEngine === "pexels") {
     // ── Pexels B-roll Path (Step 6, free, no GPU) ──
-    // 1. Fetch + trim per-slide Pexels clips
-    // 2. Copy clips into Remotion's public/ dir (for staticFile() access)
-    // 3. Hand them to renderWithRemotion via brollPaths — Remotion's bundled
-    //    Chrome+ffmpeg renders the b-roll as full-bleed background with the
-    //    title chip + word captions on top. No fragile shell-side text filters.
+    // 1. P0.0+P0.A: Research topic-aware visuals (entity extract → screenshots/wikipedia/logos/pexels-photos)
+    //    → produce VisualPlan[] (A-roll anchor + B-roll cutaways per slide)
+    // 2. Fetch Pexels video clips as the legacy fallback for any slides whose
+    //    visual plan is empty.
+    // 3. Copy fetched assets into Remotion's public/ dir (for staticFile())
+    // 4. Hand both `visualPlans` and `brollPaths` to renderWithRemotion. Remotion
+    //    prefers visualPlans[i] when present, falls back to brollPaths[i],
+    //    falls back to the branded slide component.
     try {
+      // ── P0.0 + P0.A: topic-aware visual research ──
+      let visualPlans: VisualPlan[] = [];
+      try {
+        visualPlans = await researchVisuals({
+          slides: content.slides,
+          audioSegments,
+          relatedSources,
+          outputDir,
+          config,
+        });
+      } catch (vrErr) {
+        console.warn(
+          `  ⚠ Visual research failed, falling back to plain Pexels videos: ${(vrErr as Error).message.slice(0, 120)}`,
+        );
+        visualPlans = [];
+      }
+
       const broll = await generateBrollClips(
         content.slides,
         audioSegments,
@@ -302,9 +324,13 @@ export async function runPipeline(opts: RunOptions, onEvent?: EventCallback) {
       const ok = broll.clipPaths.filter(Boolean).length;
       console.log(`  ✓ B-roll: ${ok}/${broll.clipPaths.length} clips fetched`);
 
-      if (ok < Math.ceil(broll.clipPaths.length / 2)) {
+      // Combined coverage check: a slide is "covered" if it has a visual plan with items OR a broll clip
+      const planCovered = visualPlans.filter((p) => p.items && p.items.length > 0).length;
+      const brollCovered = ok;
+      const totalCovered = Math.max(planCovered, brollCovered);
+      if (totalCovered < Math.ceil(broll.clipPaths.length / 2)) {
         throw new Error(
-          `only ${ok}/${broll.clipPaths.length} B-roll clips fetched — falling back to Remotion`,
+          `only ${totalCovered}/${broll.clipPaths.length} slides have visuals (${planCovered} plans, ${brollCovered} pexels) — falling back to Remotion`,
         );
       }
 
@@ -326,6 +352,24 @@ export async function runPipeline(opts: RunOptions, onEvent?: EventCallback) {
         }
       }
 
+      // ── P0.A: copy each VisualItem's local file into public/visuals/ + rewrite its path ──
+      const publicVisualsDir = join(publicDir, "visuals");
+      mkdirSync(publicVisualsDir, { recursive: true });
+      const publicVisualPlans: VisualPlan[] = visualPlans.map((plan) => ({
+        slideIndex: plan.slideIndex,
+        items: plan.items.map((item, j) => {
+          if (!item.path || !existsSync(item.path)) return item;
+          const ext = item.path.split(".").pop() || "bin";
+          const publicName = `visuals/slide_${String(plan.slideIndex + 1).padStart(2, "0")}_${j + 1}_${item.kind}.${ext}`;
+          try {
+            copyFileSync(item.path, join(publicDir, publicName));
+            return { ...item, path: publicName };
+          } catch {
+            return { ...item, path: undefined };
+          }
+        }),
+      }));
+
       const fb = await renderWithRemotion(
         content,
         audioSegments,
@@ -337,6 +381,7 @@ export async function runPipeline(opts: RunOptions, onEvent?: EventCallback) {
         opts,
         emit,
         brollPaths,
+        publicVisualPlans,
       );
       if (!fb) return { outputDir, content, audioSegments };
       videoResult = fb;
@@ -592,6 +637,7 @@ async function renderWithRemotion(
   opts: RunOptions,
   emit: (stage: Stage, status: string, message: string) => void,
   brollPaths?: string[],
+  visualPlans?: VisualPlan[],
 ): Promise<{
   landscapePath: string;
   portraitPath: string;
@@ -624,6 +670,7 @@ async function renderWithRemotion(
         words,
         fps,
         brollPaths,
+        visualPlans,
       },
       videoLandscapePath,
       (pct) => {
